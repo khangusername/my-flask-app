@@ -15,6 +15,19 @@ def health():
     return jsonify({"status": "ok"}), 200
 
 
+@app.route("/version")
+def version():
+    return (
+        jsonify(
+            {
+                "version": "1.0.0",
+                "environment": os.environ.get("FLASK_ENV", "production"),
+            }
+        ),
+        200,
+    )
+
+
 if __name__ == "__main__":
     from dotenv import load_dotenv
 
