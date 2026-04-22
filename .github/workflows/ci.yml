@@ -33,7 +33,7 @@ jobs:
       - name: Run tests with coverage
         run: |
           pip install pytest-cov
-          pytest --cov=app --cov-report=term-missing --cov-fail-under=75 -v
+          pytest --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=75 -v
 
       - name: Lint with flake8
         run: |
@@ -59,4 +59,22 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-report
-          path: .coverage
+          path: coverage.xml
+
+  docker-build:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t my-flask-app:${{ github.sha }} .
+
+      - name: Verify container starts
+        run: |
+          docker run -d -p 5000:5000 --name test-container my-flask-app:${{ github.sha }}
+          sleep 3
+          curl --fail http://localhost:5000/health
+          docker stop test-container
