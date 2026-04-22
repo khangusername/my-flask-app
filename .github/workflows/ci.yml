@@ -78,3 +78,23 @@ jobs:
           sleep 3
           curl --fail http://localhost:5000/health
           docker stop test-container
+
+  deploy:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Trigger Render deployment
+        run: |
+          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" \
+            --fail \
+            --silent \
+            --show-error
+
+      - name: Wait for deployment
+        run: sleep 30
+
+      - name: Verify live deployment
+        run: |
+          curl --fail https://my-flask-app-9oaw.onrender.com/health
