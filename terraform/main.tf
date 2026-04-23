@@ -33,9 +33,6 @@ resource "github_branch_protection" "main" {
     contexts = ["build-and-test", "docker-build"]
   }
 
-  required_pull_request_reviews {
-    dismiss_stale_reviews = true
-  }
 
   force_push_bypassers = []
 }
