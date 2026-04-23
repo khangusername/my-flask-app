@@ -14,3 +14,7 @@ htmlcov/
 *.swp
 .DS_Store
 *.log
+terraform.tfvars
+.terraform/
+*.tfstate
+*.tfstate.backup
