@@ -1,0 +1,614 @@
+# CI/CD Complete Study Guide
+Everything you built — April 22, 2026
+Stack: Python · Flask · GitHub Actions · Docker · Kubernetes · Terraform · Render
+
+---
+
+## Restart Checklist (run every time you open your computer)
+
+Git Bash:
+  cd ~/my-flask-app
+  source venv/Scripts/activate
+
+Ubuntu (for Kubernetes work):
+  sudo service docker start
+  minikube start --driver=docker
+
+---
+
+## Which Terminal to Use
+
+Git Bash    → git, pip, pytest, black, cat, code .
+Ubuntu WSL  → kubectl, minikube, docker, terraform, curl
+PowerShell  → Windows-only: takeown, icacls, Start-Process
+
+---
+
+## Part 1: Git & GitHub
+
+### One-time setup
+git config --global user.name "Your Name"
+git config --global user.email "you@email.com"
+git config --global init.defaultBranch main
+
+ssh-keygen -t ed25519 -C "you@email.com"
+cat ~/.ssh/id_ed25519.pub   # paste into GitHub → Settings → SSH Keys
+ssh -T git@github.com       # test: should say "Hi username!"
+
+### Daily commands
+git status                    # what changed?
+git add .                     # stage all changes
+git add filename.py           # stage one file
+git commit -m "feat: message" # save a snapshot
+git push origin main          # send to GitHub
+git pull origin main          # get latest from GitHub
+
+### Branching — ALWAYS do this before making changes
+git checkout -b feature/name  # create AND switch to new branch
+git checkout main             # switch back
+git branch -d branch-name     # safe delete (merged only)
+git branch -D branch-name     # force delete
+
+### Commit message prefixes
+feat:   new feature
+fix:    bug fix
+chore:  maintenance, no logic change
+docs:   documentation only
+test:   adding or updating tests
+
+### Virtual environment
+python -m venv venv                  # create sandbox
+source venv/Scripts/activate         # activate (Windows Git Bash)
+source venv/bin/activate             # activate (Mac/Linux)
+pip install -r requirements.txt      # install packages
+
+RULE: Every new terminal → run source venv/Scripts/activate first.
+If pytest or black says "command not found" — this is the fix.
+
+---
+
+## Part 2: The Flask App
+
+### Project structure
+my-flask-app/
+├── .github/workflows/ci.yml   ← pipeline
+├── k8s/
+│   ├── deployment.yaml
+│   └── service.yaml
+├── terraform/
+│   ├── main.tf
+│   ├── variables.tf
+│   ├── outputs.tf
+│   └── terraform.tfvars       ← NEVER COMMIT
+├── .dockerignore
+├── .env                       ← NEVER COMMIT
+├── .gitignore
+├── app.py
+├── Dockerfile
+├── requirements.txt
+└── test_app.py
+
+### Files that must NEVER be committed
+.env              contains secrets — if pushed, rotate all keys immediately
+venv/             huge, machine-specific
+terraform.tfvars  contains GitHub token
+.terraform/       downloaded providers
+*.tfstate         terraform state — contains sensitive data
+
+### app.py
+import os
+from flask import Flask, jsonify
+
+app = Flask(__name__)
+app.config["SECRET_KEY"] = os.environ.get("SECRET_KEY", "fallback-dev-key")
+
+@app.route("/")
+def home():
+    return jsonify({"message": "Hello, CI/CD!"})
+
+@app.route("/health")
+def health():
+    return jsonify({"status": "ok"}), 200
+
+@app.route("/version")
+def version():
+    return jsonify({
+        "version": "1.0.0",
+        "environment": os.environ.get("FLASK_ENV", "production")
+    }), 200
+
+if __name__ == "__main__":
+    from dotenv import load_dotenv
+    load_dotenv()
+    app.run(host="0.0.0.0", port=5000)  # nosec B104
+
+### test_app.py
+import pytest
+from app import app
+
+@pytest.fixture
+def client():
+    app.config["TESTING"] = True
+    with app.test_client() as client:
+        yield client
+
+def test_home(client):
+    response = client.get("/")
+    assert response.status_code == 200
+    assert response.json["message"] == "Hello, CI/CD!"
+
+def test_health(client):
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json["status"] == "ok"
+
+def test_version(client):
+    response = client.get("/version")
+    assert response.status_code == 200
+    assert response.json["version"] == "1.0.0"
+
+### Running locally
+pip install -r requirements.txt
+pytest -v               # run tests
+black .                 # format code
+python app.py           # start server → http://localhost:5000/health
+
+### requirements.txt
+flask==3.1.3
+pytest==9.0.3
+python-dotenv==1.2.2
+
+### .gitignore
+venv/
+.env
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+.vscode/
+.DS_Store
+*.log
+terraform.tfvars
+.terraform/
+*.tfstate
+*.tfstate.backup
+
+### .env (local only)
+FLASK_ENV=development
+FLASK_DEBUG=1
+SECRET_KEY=local-dev-secret-key
+
+---
+
+## Part 3: GitHub Actions CI Pipeline
+
+### The 3-job chain
+push to main → build-and-test → docker-build → deploy
+                                (only if green) (only if green, only on main)
+
+### .github/workflows/ci.yml
+name: CI Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        run: |
+          pip install pytest-cov
+          pytest --cov=app --cov-report=term-missing --cov-report=xml --cov-fail-under=75 -v
+
+      - name: Lint with flake8
+        run: |
+          pip install flake8
+          flake8 . --max-line-length=100 --exclude=venv,__pycache__
+
+      - name: Check code formatting with black
+        run: |
+          pip install black
+          black --check --diff .
+
+      - name: Security scan with bandit
+        run: |
+          pip install bandit
+          bandit -r app.py -ll
+
+      - name: Check for dependency vulnerabilities
+        run: |
+          pip install pip-audit
+          pip-audit -r requirements.txt
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.xml
+
+  docker-build:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build Docker image
+        run: docker build -t my-flask-app:${{ github.sha }} .
+
+      - name: Verify container starts
+        run: |
+          docker run -d -p 5000:5000 --name test-container my-flask-app:${{ github.sha }}
+          sleep 3
+          curl --fail http://localhost:5000/health
+          docker stop test-container
+
+  deploy:
+    needs: docker-build
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Trigger Render deployment
+        run: |
+          curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}" \
+            --fail --silent --show-error
+
+      - name: Wait for deployment
+        run: sleep 30
+
+      - name: Verify live deployment
+        run: |
+          curl --fail https://my-flask-app-9oaw.onrender.com/health
+
+### Key YAML concepts
+on: push/pull_request         when the pipeline triggers
+runs-on: ubuntu-latest        fresh Linux VM, destroyed after run
+uses: actions/checkout@v4     pre-built marketplace action
+run:                          shell command to execute
+needs: job-name               only run after that job passes
+${{ secrets.NAME }}           read encrypted secret
+${{ github.sha }}             current commit hash
+
+### Caching — saves 30-60s per run
+key: pip-${{ hashFiles('requirements.txt') }}
+If requirements.txt unchanged → skip downloading → faster runs
+
+---
+
+## Part 4: Docker
+
+### Dockerfile
+FROM python:3.11-slim
+# Official Python image. slim = minimal size.
+
+WORKDIR /app
+# All commands run from /app. Created automatically.
+
+COPY requirements.txt .
+# Copy requirements FIRST — layer caching optimization.
+
+RUN pip install --no-cache-dir -r requirements.txt
+# Only rebuilds when requirements.txt changes.
+
+COPY . .
+# Copy app code last. Code changes don't bust pip cache.
+
+EXPOSE 5000
+CMD ["python", "app.py"]
+
+### Layer caching — why order matters
+WRONG:                          RIGHT:
+COPY . .                        COPY requirements.txt .
+RUN pip install                 RUN pip install
+→ any code change               COPY . .
+  re-downloads everything       → pip only re-runs when
+                                  requirements.txt changes
+
+### .dockerignore
+venv/
+__pycache__/
+.git/
+.env
+*.log
+
+### Key commands
+docker build -t my-app:latest .           build image
+docker run -p 5000:5000 my-app:latest    run (host:container port)
+docker run -d -p 5000:5000 my-app        run in background
+docker ps                                 list running containers
+docker stop container-name               stop container
+docker images                            list all images
+docker logs container-name              see output
+
+### Running in minikube
+eval $(minikube docker-env)              point docker at minikube
+docker build -t my-flask-app:latest .   build into minikube
+imagePullPolicy: Never                   use local image in K8s
+
+---
+
+## Part 5: Kubernetes
+
+### Core concepts
+Node        a server in your cluster
+Cluster     group of nodes managed together
+Pod         smallest unit — wraps one or more containers
+Deployment  ensures N replicas always running
+Service     stable address routing to healthy pods
+Namespace   logical grouping — like folders
+
+### deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flask-app
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: flask-app
+  template:
+    metadata:
+      labels:
+        app: flask-app
+    spec:
+      containers:
+        - name: flask-app
+          image: my-flask-app:latest
+          imagePullPolicy: Never
+          ports:
+            - containerPort: 5000
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 5000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+          resources:
+            requests:
+              memory: "64Mi"
+              cpu: "100m"
+            limits:
+              memory: "128Mi"
+              cpu: "200m"
+
+### service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: flask-app-service
+spec:
+  selector:
+    app: flask-app
+  ports:
+    - protocol: TCP
+      port: 80
+      targetPort: 5000
+  type: NodePort
+
+### Key kubectl commands
+kubectl apply -f k8s/deployment.yaml    create/update deployment
+kubectl apply -f k8s/service.yaml       create/update service
+kubectl get pods                         list pods
+kubectl get deployments                  list deployments
+kubectl describe pod pod-name           detailed info
+kubectl logs pod-name                   see logs
+kubectl delete pod pod-name             delete (K8s replaces it)
+kubectl rollout status deployment/name  watch rollout
+kubectl rollout undo deployment/name    rollback instantly
+
+minikube start --driver=docker          start local cluster
+minikube service service-name --url     get URL to access app
+
+### Self-healing demo
+kubectl delete pod flask-app-xxxxx
+kubectl get pods
+# New pod automatically created to replace it
+
+### Rolling update (zero downtime)
+kubectl set image deployment/flask-app flask-app=my-flask-app:v2
+kubectl rollout status deployment/flask-app
+# Pods replaced one at a time — app stays online
+
+### Rollback
+kubectl rollout undo deployment/flask-app
+# Instantly back to previous version
+
+### Probes explained
+livenessProbe   is the container alive? kill and restart if failing
+readinessProbe  is the container ready? withhold traffic until passing
+
+---
+
+## Part 6: Terraform
+
+### Key concepts
+Provider    plugin that talks to a service (GitHub, AWS, GCP)
+Resource    piece of infrastructure you want to exist
+Variable    input parameter — keeps secrets out of code
+State       terraform's record of what exists (.tfstate files)
+Plan        shows what would change — without doing it
+Apply       executes the changes
+
+### main.tf
+terraform {
+  required_providers {
+    github = {
+      source  = "integrations/github"
+      version = "~> 6.0"
+    }
+  }
+}
+
+provider "github" {
+  token = var.github_token
+  owner = var.github_owner
+}
+
+resource "github_repository" "flask_app" {
+  name        = "my-flask-app"
+  description = "Flask CI/CD demo with GitHub Actions, Docker, and Kubernetes"
+  visibility  = "public"
+  delete_branch_on_merge = true
+}
+
+resource "github_branch_protection" "main" {
+  repository_id = github_repository.flask_app.node_id
+  pattern       = "main"
+  required_status_checks {
+    strict   = true
+    contexts = ["build-and-test", "docker-build"]
+  }
+}
+
+### variables.tf
+variable "github_token" {
+  description = "GitHub personal access token"
+  type        = string
+  sensitive   = true
+}
+
+variable "github_owner" {
+  type = string
+}
+
+### terraform.tfvars (NEVER COMMIT)
+github_owner = "khangusername"
+github_token = "ghp_xxxxxxxxxxxx"
+
+### Key commands
+terraform init      download providers (run once per project)
+terraform plan      preview changes — ALWAYS run before apply
+terraform apply     execute changes — type "yes" to confirm
+terraform destroy   delete all managed infrastructure
+terraform import resource_type.name existing_id
+
+### Plan symbols
++    will be created
+~    will be updated in place
+-    will be destroyed
+-/+  will be destroyed then recreated
+
+---
+
+## Part 7: Full PR Workflow
+
+# 1. Create feature branch FIRST
+git checkout -b feature/your-feature-name
+
+# 2. Make changes, test locally
+black .
+pytest -v
+
+# 3. Commit and push
+git add .
+git commit -m "feat: describe change"
+git push origin feature/your-feature-name
+
+# 4. GitHub → yellow banner → Compare & pull request → Create
+
+# 5. Wait for pipeline checks (build-and-test + docker-build)
+
+# 6. All green → Merge pull request → Confirm merge
+#    Full pipeline fires → auto-deploys to Render
+
+# 7. Clean up
+git checkout main
+git pull origin main
+git branch -d feature/your-feature-name
+
+---
+
+## Part 8: Troubleshooting
+
+pytest/black: command not found     source venv/Scripts/activate
+fatal: not a git repository         cd ~/my-flask-app
+push declined: repository rules     use feature branch + PR, never push to main
+pipeline fails                      click red X in Actions tab → read error
+terraform token scope error         add missing scope in GitHub token settings
+docker: command not found in WSL    sudo service docker start
+
+---
+
+## Part 9: Interview Answers
+
+### "Walk me through your CI/CD experience"
+I built a GitHub Actions pipeline for a Python Flask app. It runs on every push —
+pytest with 75% coverage enforcement, flake8 linting, black formatting checks,
+bandit security scanning, and pip-audit CVE detection. After all checks pass it
+builds a Docker image tagged with the commit SHA, verifies the container starts
+and responds to health checks, then automatically deploys to Render and confirms
+the live URL is healthy. The whole chain from push to production takes under 90 seconds.
+
+### "Tell me about debugging a pipeline failure"
+My first pipeline run hit four consecutive failures. Coverage threshold was too
+high for untestable code — I lowered it and explained why. Bandit flagged 0.0.0.0
+binding — I added nosec with the specific check ID after understanding the risk.
+Then pip-audit found real CVEs in Flask, pytest, and python-dotenv — I upgraded
+all three to the patched versions.
+
+### "What do you know about Docker?"
+I containerized a Flask app with layer caching optimization — copying requirements.txt
+separately before application code so pip only re-runs when dependencies change.
+Images are tagged with commit SHA for traceability. .dockerignore excludes venv
+and .env to keep images lean and secure.
+
+### "What is Kubernetes?"
+Container orchestration. I deployed a Flask app with 3 replicas, configured
+liveness and readiness probes so Kubernetes automatically replaces unhealthy pods
+and withholds traffic from pods that aren't ready. Demonstrated self-healing and
+zero-downtime rolling updates with kubectl rollout, and instant rollback with
+kubectl rollout undo.
+
+### "What is Terraform?"
+Infrastructure as code. I used the GitHub provider to manage repository settings
+and branch protection rules as code — version controlled, reviewable in PRs,
+reproducible. I ran terraform plan before every apply and used terraform import
+to bring an existing repo under management.
+
+---
+
+## Part 10: Your Live Project
+
+GitHub:   https://github.com/khangusername/my-flask-app
+Live app: https://my-flask-app-9oaw.onrender.com/health
+          https://my-flask-app-9oaw.onrender.com/version
+
+---
+
+## Part 11: What to Learn Next
+
+1. AWS          deploy to real cloud (EC2, ECS, EKS) with Terraform
+2. Helm         Kubernetes package manager, templated deployments
+3. Monitoring   Prometheus + Grafana dashboards on K8s
+4. Multi-env    staging and production as separate deploy targets
+5. Vault        HashiCorp secrets management (enterprise standard)
